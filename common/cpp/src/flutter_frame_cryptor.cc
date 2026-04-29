@@ -171,7 +171,7 @@ void FlutterFrameCryptor::FrameCryptorFactoryCreateFrameCryptor(
         new RefCountedObject<FlutterFrameCryptorObserver>(
             base_->messenger_, base_->task_runner_, event_channel));
 
-    frameCryptor->RegisterRTCFrameCryptorObserver(observer);
+    frameCryptor->RegisterRTCFrameCryptorObserver(observer.get());
 
     frame_cryptors_[uuid] = frameCryptor;
     frame_cryptor_observers_[uuid] = observer;

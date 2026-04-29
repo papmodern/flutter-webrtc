@@ -24,6 +24,22 @@ FlutterWebRTCBase::FlutterWebRTCBase(BinaryMessenger* messenger,
 }
 
 FlutterWebRTCBase::~FlutterWebRTCBase() {
+  // Deregister peer connection observers first so libwebrtc stops delivering
+  // callbacks before any Flutter objects are freed.
+  for (auto& kv : peerconnection_observers_)
+    kv.second->Deregister();
+
+  // Close all peer connections. Because observers are already deregistered,
+  // ICE/DTLS teardown callbacks will not reach Flutter code.
+  for (auto& kv : peerconnections_)
+    kv.second->Close();
+
+  // Explicitly clear maps so their element destructors run now (while the
+  // libwebrtc stack is still alive) rather than after Terminate() below.
+  peerconnection_observers_.clear();
+  peerconnections_.clear();
+  data_channel_observers_.clear();  // each dtor calls UnregisterObserver()
+
   LibWebRTC::Terminate();
 }
 

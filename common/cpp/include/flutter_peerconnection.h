@@ -14,6 +14,7 @@ class FlutterPeerConnectionObserver : public RTCPeerConnectionObserver {
                                 TaskRunner* task_runner,
                                 const std::string& channel_name,
                                 std::string& peerConnectionId);
+  ~FlutterPeerConnectionObserver();
 
   virtual void OnSignalingState(RTCSignalingState state) override;
   virtual void OnPeerConnectionState(RTCPeerConnectionState state) override;
@@ -31,6 +32,8 @@ class FlutterPeerConnectionObserver : public RTCPeerConnectionObserver {
   virtual void OnDataChannel(
       scoped_refptr<RTCDataChannel> data_channel) override;
   virtual void OnRenegotiationNeeded() override;
+
+  void Deregister();
 
   scoped_refptr<RTCMediaStream> MediaStreamForId(const std::string& id);
 

@@ -14,7 +14,11 @@ FlutterRTCDataChannelObserver::FlutterRTCDataChannelObserver(
   data_channel_->RegisterObserver(this);
 }
 
-FlutterRTCDataChannelObserver::~FlutterRTCDataChannelObserver() {}
+FlutterRTCDataChannelObserver::~FlutterRTCDataChannelObserver() {
+  if (data_channel_) {
+    data_channel_->UnregisterObserver();
+  }
+}
 
 void FlutterDataChannel::CreateDataChannel(
     const std::string& peerConnectionId,
@@ -35,7 +39,7 @@ void FlutterDataChannel::CreateDataChannel(
 
   std::string protocol = "sctp";
 
-  if (dataChannelDict.find(EncodableValue("protocol")) ==
+  if (dataChannelDict.find(EncodableValue("protocol")) !=
       dataChannelDict.end()) {
     protocol = GetValue<std::string>(
         dataChannelDict.find(EncodableValue("protocol"))->second);
@@ -57,9 +61,10 @@ void FlutterDataChannel::CreateDataChannel(
       new FlutterRTCDataChannelObserver(data_channel, base_->messenger_, base_->task_runner_,
                                         event_channel));
 
-  base_->lock();
-  base_->data_channel_observers_[uuid] = std::move(observer);
-  base_->unlock();
+  {
+    std::lock_guard<std::mutex> guard(base_->mutex_);
+    base_->data_channel_observers_[uuid] = std::move(observer);
+  }
 
   EncodableMap params;
   params[EncodableValue("id")] = EncodableValue(init.id);
