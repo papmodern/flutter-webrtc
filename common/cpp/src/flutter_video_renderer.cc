@@ -18,10 +18,19 @@ void FlutterVideoRenderer::initialize(
   event_channel_ = EventChannelProxy::Create(messenger, task_runner, channel_name);
 }
 
+void FlutterVideoRenderer::Deactivate() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  active_ = false;
+  frame_ = nullptr;
+  pixel_buffer_.reset();
+  rgb_buffer_.reset();
+}
+
 const FlutterDesktopPixelBuffer* FlutterVideoRenderer::CopyPixelBuffer(
     size_t width,
     size_t height) const {
-  mutex_.lock();
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!active_) return nullptr;
   if (pixel_buffer_.get() && frame_.get()) {
     if (pixel_buffer_->width != frame_->width() ||
         pixel_buffer_->height != frame_->height()) {
@@ -37,23 +46,28 @@ const FlutterDesktopPixelBuffer* FlutterVideoRenderer::CopyPixelBuffer(
                           static_cast<int>(pixel_buffer_->height));
 
     pixel_buffer_->buffer = rgb_buffer_.get();
-    mutex_.unlock();
     return pixel_buffer_.get();
   }
-  mutex_.unlock();
   return nullptr;
 }
 
 void FlutterVideoRenderer::OnFrame(scoped_refptr<RTCVideoFrame> frame) {
-  if (!first_frame_rendered) {
+  bool is_first = false;
+  {
+    if (!active_) return;
+    if (!first_frame_rendered) {
+      pixel_buffer_.reset(new FlutterDesktopPixelBuffer());
+      pixel_buffer_->width = 0;
+      pixel_buffer_->height = 0;
+      first_frame_rendered = true;
+      is_first = true;
+    }
+  }
+  if (is_first) {
     EncodableMap params;
     params[EncodableValue("event")] = "didFirstFrameRendered";
     params[EncodableValue("id")] = EncodableValue(texture_id_);
     event_channel_->Success(EncodableValue(params));
-    pixel_buffer_.reset(new FlutterDesktopPixelBuffer());
-    pixel_buffer_->width = 0;
-    pixel_buffer_->height = 0;
-    first_frame_rendered = true;
   }
   if (rotation_ != frame->rotation()) {
     EncodableMap params;
@@ -75,9 +89,11 @@ void FlutterVideoRenderer::OnFrame(scoped_refptr<RTCVideoFrame> frame) {
 
     last_frame_size_ = {(size_t)frame->width(), (size_t)frame->height()};
   }
-  mutex_.lock();
-  frame_ = frame;
-  mutex_.unlock();
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!active_) return;
+    frame_ = frame;
+  }
   registrar_->MarkTextureFrameAvailable(texture_id_);
 }
 
@@ -87,7 +103,10 @@ void FlutterVideoRenderer::SetVideoTrack(scoped_refptr<RTCVideoTrack> track) {
       track_->RemoveRenderer(this);
     track_ = track;
     last_frame_size_ = {0, 0};
-    first_frame_rendered = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      first_frame_rendered = false;
+    }
     if (track_)
       track_->AddRenderer(this);
   }
@@ -168,13 +187,10 @@ void FlutterVideoRendererManager::VideoRendererDispose(
   auto it = renderers_.find(texture_id);
   if (it != renderers_.end()) {
     it->second->SetVideoTrack(nullptr);
-#if defined(_WINDOWS)
-    base_->textures_->UnregisterTexture(texture_id,
-                                        [&, it] { renderers_.erase(it); });
-#else
-    base_->textures_->UnregisterTexture(texture_id);
+    it->second->Deactivate();
+    auto renderer = it->second;
     renderers_.erase(it);
-#endif
+    base_->textures_->UnregisterTexture(texture_id);
     result->Success();
     return;
   }
