@@ -14,7 +14,11 @@ FlutterRTCDataChannelObserver::FlutterRTCDataChannelObserver(
   data_channel_->RegisterObserver(this);
 }
 
-FlutterRTCDataChannelObserver::~FlutterRTCDataChannelObserver() {}
+FlutterRTCDataChannelObserver::~FlutterRTCDataChannelObserver() {
+  if (data_channel_) {
+    data_channel_->UnregisterObserver();
+  }
+}
 
 void FlutterDataChannel::CreateDataChannel(
     const std::string& peerConnectionId,

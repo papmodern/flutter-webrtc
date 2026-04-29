@@ -32,6 +32,8 @@ class FlutterPeerConnectionObserver : public RTCPeerConnectionObserver {
       scoped_refptr<RTCDataChannel> data_channel) override;
   virtual void OnRenegotiationNeeded() override;
 
+  void Deregister();
+
   scoped_refptr<RTCMediaStream> MediaStreamForId(const std::string& id);
 
   scoped_refptr<RTCMediaTrack> MediaTrackForId(const std::string& id);
