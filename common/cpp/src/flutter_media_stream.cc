@@ -7,10 +7,10 @@
 namespace flutter_webrtc_plugin {
 
 FlutterMediaStream::FlutterMediaStream(FlutterWebRTCBase* base) : base_(base) {
-  base_->audio_device_->OnDeviceChange([&] {
+  base_->audio_device_->OnDeviceChange([base = base_] {
     EncodableMap info;
     info[EncodableValue("event")] = "onDeviceChange";
-    base_->event_channel()->Success(EncodableValue(info), false);
+    base->event_channel()->Success(EncodableValue(info), false);
   });
 }
 

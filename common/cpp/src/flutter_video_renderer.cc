@@ -2,7 +2,10 @@
 
 namespace flutter_webrtc_plugin {
 
-FlutterVideoRenderer::~FlutterVideoRenderer() {}
+FlutterVideoRenderer::~FlutterVideoRenderer() {
+  SetVideoTrack(nullptr);
+  Deactivate();
+}
 
 void FlutterVideoRenderer::initialize(
     TextureRegistrar* registrar,
@@ -18,10 +21,19 @@ void FlutterVideoRenderer::initialize(
   event_channel_ = EventChannelProxy::Create(messenger, task_runner, channel_name);
 }
 
+void FlutterVideoRenderer::Deactivate() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  active_ = false;
+  frame_ = nullptr;
+  pixel_buffer_.reset();
+  rgb_buffer_.reset();
+}
+
 const FlutterDesktopPixelBuffer* FlutterVideoRenderer::CopyPixelBuffer(
     size_t width,
     size_t height) const {
-  mutex_.lock();
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!active_) return nullptr;
   if (pixel_buffer_.get() && frame_.get()) {
     if (pixel_buffer_->width != frame_->width() ||
         pixel_buffer_->height != frame_->height()) {
@@ -37,47 +49,73 @@ const FlutterDesktopPixelBuffer* FlutterVideoRenderer::CopyPixelBuffer(
                           static_cast<int>(pixel_buffer_->height));
 
     pixel_buffer_->buffer = rgb_buffer_.get();
-    mutex_.unlock();
     return pixel_buffer_.get();
   }
-  mutex_.unlock();
   return nullptr;
 }
 
 void FlutterVideoRenderer::OnFrame(scoped_refptr<RTCVideoFrame> frame) {
-  if (!first_frame_rendered) {
+  if (!active_) return;  // fast atomic pre-check
+
+  bool is_first = false;
+  bool rotation_changed = false;
+  bool size_changed = false;
+  RTCVideoFrame::VideoRotation new_rotation = RTCVideoFrame::kVideoRotation_0;
+  int32_t new_width = 0, new_height = 0;
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!active_) return;
+
+    if (!first_frame_rendered) {
+      pixel_buffer_.reset(new FlutterDesktopPixelBuffer());
+      pixel_buffer_->width = 0;
+      pixel_buffer_->height = 0;
+      first_frame_rendered = true;
+      is_first = true;
+    }
+
+    if (rotation_ != frame->rotation()) {
+      new_rotation = frame->rotation();
+      rotation_changed = true;
+      rotation_ = new_rotation;
+    }
+
+    if (last_frame_size_.width != (size_t)frame->width() ||
+        last_frame_size_.height != (size_t)frame->height()) {
+      new_width = frame->width();
+      new_height = frame->height();
+      size_changed = true;
+      last_frame_size_ = {(size_t)new_width, (size_t)new_height};
+    }
+
+    frame_ = frame;
+  }
+
+  // Fire Flutter events outside the lock to avoid potential deadlock with
+  // the platform thread calling CopyPixelBuffer while we hold mutex_.
+  if (is_first) {
     EncodableMap params;
     params[EncodableValue("event")] = "didFirstFrameRendered";
     params[EncodableValue("id")] = EncodableValue(texture_id_);
     event_channel_->Success(EncodableValue(params));
-    pixel_buffer_.reset(new FlutterDesktopPixelBuffer());
-    pixel_buffer_->width = 0;
-    pixel_buffer_->height = 0;
-    first_frame_rendered = true;
   }
-  if (rotation_ != frame->rotation()) {
+  if (rotation_changed) {
     EncodableMap params;
     params[EncodableValue("event")] = "didTextureChangeRotation";
     params[EncodableValue("id")] = EncodableValue(texture_id_);
-    params[EncodableValue("rotation")] =
-        EncodableValue((int32_t)frame->rotation());
+    params[EncodableValue("rotation")] = EncodableValue((int32_t)new_rotation);
     event_channel_->Success(EncodableValue(params));
-    rotation_ = frame->rotation();
   }
-  if (last_frame_size_.width != frame->width() ||
-      last_frame_size_.height != frame->height()) {
+  if (size_changed) {
     EncodableMap params;
     params[EncodableValue("event")] = "didTextureChangeVideoSize";
     params[EncodableValue("id")] = EncodableValue(texture_id_);
-    params[EncodableValue("width")] = EncodableValue((int32_t)frame->width());
-    params[EncodableValue("height")] = EncodableValue((int32_t)frame->height());
+    params[EncodableValue("width")] = EncodableValue(new_width);
+    params[EncodableValue("height")] = EncodableValue(new_height);
     event_channel_->Success(EncodableValue(params));
-
-    last_frame_size_ = {(size_t)frame->width(), (size_t)frame->height()};
   }
-  mutex_.lock();
-  frame_ = frame;
-  mutex_.unlock();
+
   registrar_->MarkTextureFrameAvailable(texture_id_);
 }
 
@@ -86,8 +124,11 @@ void FlutterVideoRenderer::SetVideoTrack(scoped_refptr<RTCVideoTrack> track) {
     if (track_)
       track_->RemoveRenderer(this);
     track_ = track;
-    last_frame_size_ = {0, 0};
-    first_frame_rendered = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      last_frame_size_ = {0, 0};
+      first_frame_rendered = false;
+    }
     if (track_)
       track_->AddRenderer(this);
   }
@@ -168,13 +209,10 @@ void FlutterVideoRendererManager::VideoRendererDispose(
   auto it = renderers_.find(texture_id);
   if (it != renderers_.end()) {
     it->second->SetVideoTrack(nullptr);
-#if defined(_WINDOWS)
-    base_->textures_->UnregisterTexture(texture_id,
-                                        [&, it] { renderers_.erase(it); });
-#else
-    base_->textures_->UnregisterTexture(texture_id);
+    it->second->Deactivate();
+    auto renderer = it->second;
     renderers_.erase(it);
-#endif
+    base_->textures_->UnregisterTexture(texture_id);
     result->Success();
     return;
   }

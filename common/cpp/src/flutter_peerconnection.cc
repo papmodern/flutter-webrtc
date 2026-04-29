@@ -389,15 +389,21 @@ void FlutterPeerConnection::RTCPeerConnectionClose(
     RTCPeerConnection* pc,
     const std::string& uuid,
     std::unique_ptr<MethodResultProxy> result) {
+  // Deregister the observer first so libwebrtc stops delivering callbacks
+  // before the observer object is freed. Without this, ICE/DTLS cleanup
+  // callbacks (~14s timeout) fire on a deleted observer causing heap corruption.
+  auto obs_it = base_->peerconnection_observers_.find(uuid);
+  if (obs_it != base_->peerconnection_observers_.end())
+    obs_it->second->Deregister();
+
   auto it2 = base_->peerconnections_.find(uuid);
   if (it2 != base_->peerconnections_.end()) {
     it2->second->Close();
     base_->peerconnections_.erase(it2);
   }
 
-  auto it = base_->peerconnection_observers_.find(uuid);
-  if (it != base_->peerconnection_observers_.end())
-    base_->peerconnection_observers_.erase(it);
+  if (obs_it != base_->peerconnection_observers_.end())
+    base_->peerconnection_observers_.erase(obs_it);
 
   result->Success();
 }
@@ -1186,6 +1192,16 @@ FlutterPeerConnectionObserver::FlutterPeerConnectionObserver(
   peerconnection->RegisterRTCPeerConnectionObserver(this);
 }
 
+FlutterPeerConnectionObserver::~FlutterPeerConnectionObserver() {
+  Deregister();
+}
+
+void FlutterPeerConnectionObserver::Deregister() {
+  if (peerconnection_) {
+    peerconnection_->DeRegisterRTCPeerConnectionObserver();
+    peerconnection_ = nullptr;
+  }
+}
 
 void FlutterPeerConnectionObserver::OnSignalingState(RTCSignalingState state) {
   EncodableMap params;
@@ -1388,9 +1404,10 @@ void FlutterPeerConnectionObserver::OnDataChannel(
                                         base_->task_runner_,
                                         event_channel));
 
-  base_->lock();
-  base_->data_channel_observers_[channel_uuid] = std::move(observer);
-  base_->unlock();
+  {
+    std::lock_guard<std::mutex> guard(base_->mutex_);
+    base_->data_channel_observers_[channel_uuid] = std::move(observer);
+  }
 
   EncodableMap params;
   params[EncodableValue("event")] = "didOpenDataChannel";
